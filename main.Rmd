@@ -1,0 +1,74 @@
+---
+title: "main"
+author: "nwfried"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(sf)
+library(tigris)
+library(tidyverse)
+```
+read in dec 8 data (just one day for now)
+```{r}
+filepath <- "~/Documents/congestion_pricing/mapbox_drive_times/data"
+dec8 <- read_csv(file.path(filepath, "mapbox_output_2024-12-08_HH08.csv"))
+```
+initialise variables for congestion zone
+```{r}
+cong_zips <-c("10036", "10038", "10280", "10282")
+for (i in 10001:10022) {
+  cong_zips <- append(cong_zips, as.character(i))
+}
+```
+
+<!-- determine whether trip started or ended in congestion zone -->
+<!-- ```{r} -->
+<!-- dec8 <- dec8 %>% mutate( -->
+<!--   inputzip = as.character(inputzip), -->
+<!--   zip_commute = as.character(zip_commute), -->
+<!--   cong = as.integer(inputzip %in% cong_zips | zip_commute %in% cong_zips) -->
+<!-- ) -->
+<!-- ``` -->
+pull GIS info for Manhattan
+```{r}
+newyork <- tigris::counties(state = "NY", class = "sf")
+manhattan <- newyork %>% filter(NAME == "New York")
+brooklyn <- newyork %>% filter(NAME == "Kings")
+```
+pull GIS info for congestion zip codes
+```{r}
+cong_zone <- tigris::zctas(year = "2020", class = "sf")
+cong_zone <- cong_zone %>% filter(ZCTA5CE20 %in% cong_zips)
+```
+```{r}
+ggplot() + geom_sf(data = manhattan, fill = "lightblue", color = "darkblue")
+```
+convert data to linestring object 
+```{r}
+dec8_long <- dec8 %>% pivot_longer(cols = c(orig_long, orig_lat, dest_long, dest_lat), names_to = c("type", ".value"), names_sep = "_") #break up origin and destination long/lat pairs
+dec8_point <- dec8_long %>% st_as_sf(coords = c("long", "lat"), crs = "+proj=longlat +datum=WGS84") #not really sure if this is fine for CRS
+dec8_line <- dec8_point %>%
+  filter(duration != 0) %>% #need to remove trips with duration 0
+  group_by(X) %>%
+  summarize %>%
+  st_cast("LINESTRING")
+```
+
+```{r}
+ggplot() + geom_sf(data = dec8_line, fill = "lightblue", color = "darkblue")
+```
+
+merge all days into one dataset to apply same analysis
+```{r}
+file_list <- list.files(file_path, pattern = "\\.csv$", full.names = TRUE)
+all <- file_list %>%
+  map_df(~ read_csv(.x) %>% 
+           mutate(date = str_extract(basename(.x), "\\d{4}-\\d{2}-\\d{2}")))
+```
+
