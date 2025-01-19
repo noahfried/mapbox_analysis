@@ -8,18 +8,19 @@ output: pdf_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
-
+Load libraries
 ```{r}
 library(sf)
 library(tigris)
 library(tidyverse)
+library(jsonlite)
+library(knitr)
 ```
-read in dec 8 data (just one day for now)
+
 ```{r}
 filepath <- "~/Documents/congestion_pricing/mapbox_drive_times/data"
-dec8 <- read_csv(file.path(filepath, "mapbox_output_2024-12-08_HH08.csv"))
 ```
-initialise variables for congestion zone
+Initialise variables for congestion zone
 ```{r}
 cong_zips <-c("10036", "10038", "10280", "10282")
 for (i in 10001:10022) {
@@ -35,40 +36,195 @@ for (i in 10001:10022) {
 <!--   cong = as.integer(inputzip %in% cong_zips | zip_commute %in% cong_zips) -->
 <!-- ) -->
 <!-- ``` -->
-pull GIS info for Manhattan
+Pull GIS info for Manhattan
 ```{r}
-newyork <- tigris::counties(state = "NY", class = "sf")
-manhattan <- newyork %>% filter(NAME == "New York")
-brooklyn <- newyork %>% filter(NAME == "Kings")
+newyork <- tigris::counties(state = "NY", class = "sf") %>%
+  st_transform(crs = "WGS84")
+manhattan <- newyork %>% filter(NAME == "New York") %>%
+  st_transform(crs = "+proj=longlat +datum=WGS84")
+brooklyn <- newyork %>% filter(NAME == "Kings") %>%
+  st_transform(crs = "WGS84")
+bronx <- newyork %>% filter(NAME == "Bronx") %>%
+  st_transform(crs = "WGS84")
+staten_island <- newyork %>% filter(NAME == "Richmond") %>%
+  st_transform(crs = "WGS84")
+queens <- newyork %>% filter(NAME == "Queens") %>%
+  st_transform(crs = "WGS84") #probably a better way to just pull in WGS84 coords lol
+nyc <- newyork %>% filter(NAME == "New York" | NAME == "Kings" | NAME == "Bronx" | NAME == "Richmond" | NAME == "Queens") %>% st_transform(crs = "WGS84")
+manhattan_planar <- manhattan %>% st_transform(32618)
 ```
-pull GIS info for congestion zip codes
+Pull GIS info for congestion zip codes
 ```{r}
 cong_zone <- tigris::zctas(year = "2020", class = "sf")
-cong_zone <- cong_zone %>% filter(ZCTA5CE20 %in% cong_zips)
+cong_zone <- cong_zone %>% filter(ZCTA5CE20 %in% cong_zips) %>% st_transform(crs = "WGS84")
 ```
 ```{r}
 ggplot() + geom_sf(data = manhattan, fill = "lightblue", color = "darkblue")
 ```
-convert data to linestring object 
 ```{r}
-dec8_long <- dec8 %>% pivot_longer(cols = c(orig_long, orig_lat, dest_long, dest_lat), names_to = c("type", ".value"), names_sep = "_") #break up origin and destination long/lat pairs
-dec8_point <- dec8_long %>% st_as_sf(coords = c("long", "lat"), crs = "+proj=longlat +datum=WGS84") #not really sure if this is fine for CRS
-dec8_line <- dec8_point %>%
-  filter(duration != 0) %>% #need to remove trips with duration 0
-  group_by(X) %>%
-  summarize %>%
-  st_cast("LINESTRING")
+make_sf <- function(df){
+  df<- df %>% filter(duration!= 0) %>% left_join(jan15_less) %>%
+  rowwise() %>%
+  filter(duration_min != 0, coordinates != "{}") %>%
+  mutate(
+    geometry = list(
+      st_linestring(
+        as.matrix(fromJSON(coordinates))
+      )
+    )
+  ) %>%
+  st_as_sf(crs = 4326)
+  return(df)
+}
+```
+```{r}
+analyse_sf <- function(sf){
+  sf <- sf %>% mutate(
+  cong = sapply(st_intersects(geometry, cong_zone), function(x) length(x) > 0),
+  manhattan = sapply(st_intersects(geometry, manhattan), function(x) length(x) > 0),
+  brooklyn = sapply(st_intersects(geometry, brooklyn), function(x) length(x) > 0),
+  queens = sapply(st_intersects(geometry, queens), function(x) length(x) > 0),
+  bronx = sapply(st_intersects(geometry, bronx), function(x) length(x) > 0),
+  staten_island = sapply(st_intersects(geometry, staten_island), function(x) length(x) > 0),
+  nyc = sapply(st_intersects(geometry, nyc), function(x) length(x) > 0))%>%
+  st_transform(32618) %>% mutate(
+  crosses_manhattan = lengths(st_crosses(geometry, manhattan_planar)) > 0
+)
+  return(sf)
+}
+```
+
+
+```{r}
+jan15 <- read_delim(file.path(filepath, "mapbox_output_2025-01-15_HH08.csv"))
+jan15_sf <- jan15 %>% rowwise() %>%
+  filter(duration_min != 0) %>%
+  mutate(
+    geometry = list(
+      st_linestring(
+        as.matrix(fromJSON(coordinates))
+      )
+    )
+  ) %>%
+  st_as_sf(crs = 4326)
+```
+turn this into function
+```{r}
+jan15_less <- jan15 %>% select(orig_long, orig_lat, dest_long, dest_lat, coordinates) %>% rowwise() %>%
+  filter(coordinates != '{}') %>%
+  mutate(
+    geometry = list(
+      st_linestring(
+        as.matrix(fromJSON(coordinates))
+      )
+    )
+  ) %>%
+  st_as_sf(crs = 4326)
+jan15_less <- analyse_sf(jan15_less)
+jan15_less <- jan15_less %>% st_drop_geometry()
+
 ```
 
 ```{r}
-ggplot() + geom_sf(data = dec8_line, fill = "lightblue", color = "darkblue")
+cong_info <- function(df) {
+  mean <- df %>% st_drop_geometry %>%
+    ungroup() %>%
+    filter(cong == TRUE)%>%
+    summarise(mean_duration = mean(duration_min), median = median(duration_min), n = n())
+  return(mean)
+}
+```
+```{r}
+trip_info <- function(df) {
+  mean <- df%>%st_drop_geometry%>%
+    ungroup()%>%
+  summarise(mean_duration = mean(duration_min), median = median(duration_min), n = n())
+  return(mean) 
+}
 ```
 
-merge all days into one dataset to apply same analysis
 ```{r}
-file_list <- list.files(file_path, pattern = "\\.csv$", full.names = TRUE)
-all <- file_list %>%
-  map_df(~ read_csv(.x) %>% 
-           mutate(date = str_extract(basename(.x), "\\d{4}-\\d{2}-\\d{2}")))
+extract_date_hour <- function(file_name) {
+  match <- str_match(file_name, "mapbox_output_(\\d{4}-\\d{2}-\\d{2})_HH(\\d{2})")
+  list(
+    date = match[2],  # Extracted date (YYYY-MM-DD)
+    hour = match[3]   # Extracted hour (HH)
+  )
+}
 ```
+
+```{r}
+# Read all CSV files in a folder
+process_csv_files <- function(folder_path) {
+  # List all CSV files in the folder
+  csv_files <- list.files(path = folder_path, pattern = "\\.csv$", full.names = TRUE)
+  # Empty dataframe to store results
+ results_df <- data.frame(
+    date = character(),
+    hour = character(),
+    cong_mean = numeric(),
+    trip_mean = numeric(),
+    stringsAsFactors = FALSE
+  )
+
+  # Loop over all files
+  for (file in csv_files) {
+    extracted <- extract_date_hour(basename(file))
+    date_hour <- paste0(extracted$date, "_", extracted$hour)  # Combine date and hour for unique naming
+
+    # Read the CSV file
+    data <- read.csv(file)
+    
+    # Apply the functions
+    sf_data <- left_join(data, jan15_less, relationship = "many-to-many") %>% filter(duration!=0, coordinates != '{}')
+    congestion_result <- cong_info(sf_data)
+    trip_result <- trip_info(sf_data)
+    # Store the result in a named list
+   results_df <- rbind(
+      results_df,
+      data.frame(
+        date = extracted$date,
+        hour = extracted$hour,
+        cong_mean = congestion_result,
+        trip_mean = trip_result,
+        stringsAsFactors = FALSE
+      )
+    )
+
+  }
+  
+  return(results_df)
+}
+```
+```{r}
+results <- process_csv_files(filepath)
+```
+```{r}
+ggplot(results, aes(x = as.POSIXct(paste(date, hour), format = "%Y-%m-%d %H"), y = cong_mean.mean_duration)) +
+  geom_line(color = "blue") +
+  geom_point(color = "red") +
+  geom_vline(xintercept = as.POSIXct("2025-01-05 00:00", format = "%Y-%m-%d %H"), linetype = "solid", color = "black", size = 0.8) +
+  labs(
+    x = "Time",
+    y = "Mean Duration",
+    title = "Mean Congestion Duration Over Time"
+  ) +
+  theme_minimal()
+```
+Plot median congestion duration over time
+```{r}
+results1 <- results[-69, ]
+ggplot(results1, aes(x = as.POSIXct(paste(date, hour), format = "%Y-%m-%d %H"), y = cong_mean.median)) +
+  geom_line(color = "blue") +
+  geom_point(color = "red") +
+  geom_vline(xintercept = as.POSIXct("2025-01-05 00:00", format = "%Y-%m-%d %H"), linetype = "solid", color = "black", size = 0.8) +
+  labs(
+    x = "Time",
+    y = "Median Duration",
+    title = "Median Congestion Duration Over Time"
+  ) +
+  theme_minimal()
+```
+
+
 
