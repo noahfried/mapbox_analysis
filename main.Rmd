@@ -179,7 +179,7 @@ process_csv_files <- function(folder_path) {
     sf_data <- left_join(data, jan15_less, relationship = "many-to-many") %>% filter(duration!=0, coordinates != '{}')
     congestion_result <- cong_info(sf_data)
     trip_result <- trip_info(sf_data)
-    # Store the result in a named list
+    # Store the result in results dataframe
    results_df <- rbind(
       results_df,
       data.frame(
