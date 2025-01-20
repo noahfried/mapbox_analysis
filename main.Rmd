@@ -199,6 +199,7 @@ process_csv_files <- function(folder_path) {
 ```{r}
 results <- process_csv_files(filepath)
 ```
+Mean trip duration with the congestion zone against time; line indicates date congestion relief begins.
 ```{r}
 ggplot(results, aes(x = as.POSIXct(paste(date, hour), format = "%Y-%m-%d %H"), y = cong_mean.mean_duration)) +
   geom_line(color = "blue") +
@@ -211,7 +212,7 @@ ggplot(results, aes(x = as.POSIXct(paste(date, hour), format = "%Y-%m-%d %H"), y
   ) +
   theme_minimal()
 ```
-Plot median congestion duration over time
+Median trip duration with the congestion zone against time; line indicates date congestion relief begins.
 ```{r}
 results1 <- results[-69, ]
 ggplot(results1, aes(x = as.POSIXct(paste(date, hour), format = "%Y-%m-%d %H"), y = cong_mean.median)) +
@@ -225,6 +226,35 @@ ggplot(results1, aes(x = as.POSIXct(paste(date, hour), format = "%Y-%m-%d %H"), 
   ) +
   theme_minimal()
 ```
-
+```{r}
+results$datetime <- as.POSIXct(paste(results$date, results$hour), format = "%Y-%m-%d %H")
+ggplot(results, aes(x = datetime)) +
+  geom_line(aes(y = cong_mean.mean_duration, color = "Mean Congestion Duration"), size = 1) +
+  geom_line(aes(y = trip_mean.mean_duration, color = "Mean Trip Duration"), size = 1) +
+  geom_point(aes(y = cong_mean.mean_duration, color = "Mean Congestion Duration"), size = 2) +
+  geom_point(aes(y = trip_mean.mean_duration, color = "Mean Trip Duration"), size = 2) +
+  geom_vline(
+    xintercept = as.POSIXct("2025-01-05 00:00", format = "%Y-%m-%d %H"),
+    linetype = "dashed", color = "black", size = 0.8
+  ) +
+  labs(
+    x = "Time",
+    y = "Duration (Minutes)",
+    title = "Congestion vs Trip Duration Over Time",
+    color = "Legend"
+  ) +
+  theme_minimal()
+```
+Summary statistics:
+```{r}
+cong_stats <- results[-c(1:45), ] %>%
+  summarise(mean_cong = mean(cong_mean.mean_duration), mean_trip = mean(trip_mean.mean_duration), median_cong = median(cong_mean.median), median_trip = median(trip_mean.median))
+before_cong <- results[1:45, ] %>%
+  summarise(mean_cong = mean(cong_mean.mean_duration), mean_trip = mean(trip_mean.mean_duration), median_cong = median(cong_mean.median), median_trip = median(trip_mean.median))
+```
+```{r}
+cong_stats
+before_cong
+```
 
 
