@@ -15,6 +15,7 @@ library(tigris)
 library(tidyverse)
 library(jsonlite)
 library(knitr)
+options(tigris_use_cache = TRUE)
 ```
 
 ```{r}
@@ -63,9 +64,9 @@ ggplot() + geom_sf(data = manhattan, fill = "lightblue", color = "darkblue")
 ```
 ```{r}
 make_sf <- function(df){
-  df<- df %>% filter(duration!= 0) %>% left_join(jan15_less) %>%
+  df<- df %>% filter(duration!= 0) %>% left_join(jan15_less,by = c("orig_long", "orig_lat", "dest_long", "dest_lat")) %>%
   rowwise() %>%
-  filter(duration_min != 0, coordinates != "{}") %>%
+  filter(duration_min != 0, coordinates.x != "{}", coordinates.y != "{}") %>%
   mutate(
     geometry = list(
       st_linestring(
@@ -141,6 +142,11 @@ trip_info <- function(df) {
   summarise(mean_duration = mean(duration_min), median = median(duration_min), n = n())
   return(mean) 
 }
+control_info <- function(df) {
+  mean <- df%>%st_drop_geometry%>% ungroup()%>% filter(nyc == FALSE) %>%
+    summarise(mean_duration = mean(duration_min), median = median(duration_min), n = n())
+  return(mean)
+}
 ```
 
 ```{r}
@@ -164,6 +170,7 @@ process_csv_files <- function(folder_path) {
     hour = character(),
     cong_mean = numeric(),
     trip_mean = numeric(),
+    control_mean = numeric(),
     stringsAsFactors = FALSE
   )
 
@@ -176,9 +183,10 @@ process_csv_files <- function(folder_path) {
     data <- read.csv(file)
     
     # Apply the functions
-    sf_data <- left_join(data, jan15_less, relationship = "many-to-many") %>% filter(duration!=0, coordinates != '{}')
+    sf_data <- left_join(data, jan15_less, by = c("orig_long", "orig_lat", "dest_long", "dest_lat"), relationship = "many-to-many") %>% filter(duration!=0)
     congestion_result <- cong_info(sf_data)
     trip_result <- trip_info(sf_data)
+    control_result <- control_info(sf_data)
     # Store the result in results dataframe
    results_df <- rbind(
       results_df,
@@ -187,6 +195,7 @@ process_csv_files <- function(folder_path) {
         hour = extracted$hour,
         cong_mean = congestion_result,
         trip_mean = trip_result,
+        control_mean = control_result,
         stringsAsFactors = FALSE
       )
     )
@@ -209,13 +218,12 @@ ggplot(results, aes(x = as.POSIXct(paste(date, hour), format = "%Y-%m-%d %H"), y
     x = "Time",
     y = "Mean Duration",
     title = "Mean Congestion Duration Over Time"
-  ) +
+  ) + scale_y_continuous(expand = c(0, 0), limits = c(90, NA)) + 
   theme_minimal()
 ```
 Median trip duration with the congestion zone against time; line indicates date congestion relief begins.
 ```{r}
-results1 <- results[-69, ]
-ggplot(results1, aes(x = as.POSIXct(paste(date, hour), format = "%Y-%m-%d %H"), y = cong_mean.median)) +
+ggplot(results, aes(x = as.POSIXct(paste(date, hour), format = "%Y-%m-%d %H"), y = cong_mean.median)) +
   geom_line(color = "blue") +
   geom_point(color = "red") +
   geom_vline(xintercept = as.POSIXct("2025-01-05 00:00", format = "%Y-%m-%d %H"), linetype = "solid", color = "black", size = 0.8) +
@@ -223,9 +231,23 @@ ggplot(results1, aes(x = as.POSIXct(paste(date, hour), format = "%Y-%m-%d %H"), 
     x = "Time",
     y = "Median Duration",
     title = "Median Congestion Duration Over Time"
-  ) +
+  ) + scale_y_continuous(expand = c(0, 0), limits = c(10, NA)) + 
   theme_minimal()
 ```
+Mean control trip duration over time (trips outside of NYC):
+```{r}
+ggplot(results, aes(x = as.POSIXct(paste(date, hour), format = "%Y-%m-%d %H"), y = control_mean.mean_duration)) +
+  geom_line(color = "blue") +
+  geom_point(color = "red") +
+  geom_vline(xintercept = as.POSIXct("2025-01-05 00:00", format = "%Y-%m-%d %H"), linetype = "solid", color = "black", size = 0.8) +
+  labs(
+    x = "Time",
+    y = "Mean Duration",
+    title = "Mean Control Duration Over Time"
+  ) + scale_y_continuous(expand = c(0, 0), limits = c(10, NA)) + 
+  theme_minimal()
+```
+
 ```{r}
 results$datetime <- as.POSIXct(paste(results$date, results$hour), format = "%Y-%m-%d %H")
 ggplot(results, aes(x = datetime)) +
@@ -233,6 +255,8 @@ ggplot(results, aes(x = datetime)) +
   geom_line(aes(y = trip_mean.mean_duration, color = "Mean Trip Duration"), size = 1) +
   geom_point(aes(y = cong_mean.mean_duration, color = "Mean Congestion Duration"), size = 2) +
   geom_point(aes(y = trip_mean.mean_duration, color = "Mean Trip Duration"), size = 2) +
+  geom_line(aes(y = control_mean.mean_duration, color = "Mean Control Duration"), size = 1) +
+  geom_point(aes(y = control_mean.mean_duration, color = "Mean Control Duration"), size = 2) +
   geom_vline(
     xintercept = as.POSIXct("2025-01-05 00:00", format = "%Y-%m-%d %H"),
     linetype = "dashed", color = "black", size = 0.8
@@ -245,16 +269,59 @@ ggplot(results, aes(x = datetime)) +
   ) +
   theme_minimal()
 ```
+Filter by hour.
+```{r}
+results_08 <- results %>% filter(hour == '08') %>% select(-hour)
+results_12 <- results %>% filter(hour == '12') %>% select(-hour)
+results_17 <- results %>% filter(hour == '17') %>% select(-hour)
+```
+Plot:
+```{r}
+ggplot(results_08, aes(x = as.Date(date), y = cong_mean.mean_duration)) +
+  geom_line(color = "blue") +
+  geom_point(color = "red") +
+  geom_vline(xintercept = as.Date("2025-01-05"), linetype = "solid", color = "black", size = 0.8) +
+  labs(
+    x = "Date",
+    y = "Mean Duration",
+    title = "Mean Congestion Duration 08:00"
+  ) + scale_y_continuous(expand = c(0, 0), limits = c(100, NA)) + 
+  theme_minimal()
+
+ggplot(results_12, aes(x = as.Date(date), y = cong_mean.mean_duration)) +
+  geom_line(color = "blue") +
+  geom_point(color = "red") +
+  geom_vline(xintercept = as.Date("2025-01-05"), linetype = "solid", color = "black", size = 0.8) +
+  labs(
+    x = "Date",
+    y = "Mean Duration",
+    title = "Mean Congestion Duration 12:00"
+  ) + scale_y_continuous(expand = c(0, 0), limits = c(100, NA)) +  # Ensure the y-axis starts at 100
+  theme_minimal()
+ggplot(results_17, aes(x = as.Date(date), y = cong_mean.mean_duration)) +
+  geom_line(color = "blue") +
+  geom_point(color = "red") +
+  geom_vline(xintercept = as.Date("2025-01-05"), linetype = "solid", color = "black", size = 0.8) +
+  labs(
+    x = "Date",
+    y = "Mean Duration",
+    title = "Mean Congestion Duration 17:00"
+  ) + scale_y_continuous(expand = c(0, 0), limits = c(100, NA)) +  # Ensure the y-axis starts at 100
+  theme_minimal()
+```
+
 Summary statistics:
 ```{r}
 cong_stats <- results[-c(1:45), ] %>%
-  summarise(mean_cong = mean(cong_mean.mean_duration), mean_trip = mean(trip_mean.mean_duration), median_cong = median(cong_mean.median), median_trip = median(trip_mean.median))
+  summarise(mean_cong = mean(cong_mean.mean_duration), mean_trip = mean(trip_mean.mean_duration), median_cong = median(cong_mean.median), median_trip = median(trip_mean.median), mean_control = mean(control_mean.mean_duration))
 before_cong <- results[1:45, ] %>%
-  summarise(mean_cong = mean(cong_mean.mean_duration), mean_trip = mean(trip_mean.mean_duration), median_cong = median(cong_mean.median), median_trip = median(trip_mean.median))
+  summarise(mean_cong = mean(cong_mean.mean_duration), mean_trip = mean(trip_mean.mean_duration), median_cong = median(cong_mean.median), median_trip = median(trip_mean.median), mean_control = mean(control_mean.mean_duration))
 ```
 ```{r}
 cong_stats
 before_cong
 ```
+
+
 
 
