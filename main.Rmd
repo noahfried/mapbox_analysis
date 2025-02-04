@@ -8,7 +8,7 @@ output: pdf_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
-Load libraries
+Load libraries.
 ```{r}
 library(sf)
 library(tigris)
@@ -21,23 +21,14 @@ options(tigris_use_cache = TRUE)
 ```{r}
 filepath <- "~/Documents/congestion_pricing/mapbox_drive_times/data"
 ```
-Initialise variables for congestion zone
+Initialise zipcodes for congestion zone as list.
 ```{r}
 cong_zips <-c("10036", "10038", "10280", "10282")
 for (i in 10001:10022) {
   cong_zips <- append(cong_zips, as.character(i))
 }
 ```
-
-<!-- determine whether trip started or ended in congestion zone -->
-<!-- ```{r} -->
-<!-- dec8 <- dec8 %>% mutate( -->
-<!--   inputzip = as.character(inputzip), -->
-<!--   zip_commute = as.character(zip_commute), -->
-<!--   cong = as.integer(inputzip %in% cong_zips | zip_commute %in% cong_zips) -->
-<!-- ) -->
-<!-- ``` -->
-Pull GIS info for Manhattan
+Pull GIS info for NYC.
 ```{r}
 newyork <- tigris::counties(state = "NY", class = "sf") %>%
   st_transform(crs = "WGS84")
@@ -54,30 +45,18 @@ queens <- newyork %>% filter(NAME == "Queens") %>%
 nyc <- newyork %>% filter(NAME == "New York" | NAME == "Kings" | NAME == "Bronx" | NAME == "Richmond" | NAME == "Queens") %>% st_transform(crs = "WGS84")
 manhattan_planar <- manhattan %>% st_transform(32618)
 ```
-Pull GIS info for congestion zip codes
+Pull GIS info for New Jersey.
+```{r}
+nj_counties <- counties(state = "NJ", cb = TRUE) %>%
+  filter(NAME %in% c("Hudson", "Bergen", "Essex", "Union")) %>%  st_transform(crs = "WGS84")
+```
+
+Pull GIS info for congestion zip codes from list.
 ```{r}
 cong_zone <- tigris::zctas(year = "2020", class = "sf")
 cong_zone <- cong_zone %>% filter(ZCTA5CE20 %in% cong_zips) %>% st_transform(crs = "WGS84")
 ```
-```{r}
-ggplot() + geom_sf(data = manhattan, fill = "lightblue", color = "darkblue")
-```
-```{r}
-make_sf <- function(df){
-  df<- df %>% filter(duration!= 0) %>% left_join(jan15_less,by = c("orig_long", "orig_lat", "dest_long", "dest_lat")) %>%
-  rowwise() %>%
-  filter(duration_min != 0, coordinates.x != "{}", coordinates.y != "{}") %>%
-  mutate(
-    geometry = list(
-      st_linestring(
-        as.matrix(fromJSON(coordinates))
-      )
-    )
-  ) %>%
-  st_as_sf(crs = 4326)
-  return(df)
-}
-```
+Define function to intersect sf file with relevant GIS objects from above (e.g. congestion zone, NYC).
 ```{r}
 analyse_sf <- function(sf){
   sf <- sf %>% mutate(
@@ -88,30 +67,24 @@ analyse_sf <- function(sf){
   bronx = sapply(st_intersects(geometry, bronx), function(x) length(x) > 0),
   staten_island = sapply(st_intersects(geometry, staten_island), function(x) length(x) > 0),
   nyc = sapply(st_intersects(geometry, nyc), function(x) length(x) > 0))%>%
-  st_transform(32618) %>% mutate(
+  st_transform(32618) %>% #st_crosses requires reprojection to 32618 (planar) coordinate system
+  mutate(
   crosses_manhattan = lengths(st_crosses(geometry, manhattan_planar)) > 0
 )
   return(sf)
 }
 ```
-
-
+Define function to intersect sf file with only the congestion zone (as above, just simplified).
 ```{r}
-jan15 <- read_delim(file.path(filepath, "mapbox_output_2025-01-15_HH08.csv"))
-jan15_sf <- jan15 %>% rowwise() %>%
-  filter(duration_min != 0) %>%
-  mutate(
-    geometry = list(
-      st_linestring(
-        as.matrix(fromJSON(coordinates))
-      )
-    )
-  ) %>%
-  st_as_sf(crs = 4326)
+analyse_cong <- function(sf) {
+  sf <- sf %>% mutate(
+    cong = sapply(st_intersects(geometry, cong_zone), function(x) length(x) > 0)
+  )
+}
 ```
-turn this into function
+Read in Jan 15 data (first dataset with coordinates), select only columns that correspond to relevant geometry (lat/long + coordinates), and apply analyse_sf function from above.
 ```{r}
-jan15_less <- jan15 %>% select(orig_long, orig_lat, dest_long, dest_lat, coordinates) %>% rowwise() %>%
+jan15_less <- read_delim(file.path(filepath, "mapbox_output_2025-01-15_HH08.csv")) %>% select(orig_long, orig_lat, dest_long, dest_lat, coordinates) %>% rowwise() %>%
   filter(coordinates != '{}') %>%
   mutate(
     geometry = list(
@@ -123,32 +96,29 @@ jan15_less <- jan15 %>% select(orig_long, orig_lat, dest_long, dest_lat, coordin
   st_as_sf(crs = 4326)
 jan15_less <- analyse_sf(jan15_less)
 jan15_less <- jan15_less %>% st_drop_geometry()
-
 ```
-
+Define functions to sort dataset by relevant categories (in congestion zone, outside of NYC) and compute the mean and median duration of selected trips.
 ```{r}
 cong_info <- function(df) {
-  mean <- df %>% st_drop_geometry %>%
+  mean <- df %>%
     ungroup() %>%
     filter(cong == TRUE)%>%
     summarise(mean_duration = mean(duration_min), median = median(duration_min), n = n())
   return(mean)
 }
-```
-```{r}
 trip_info <- function(df) {
-  mean <- df%>%st_drop_geometry%>%
+  mean <- df%>%
     ungroup()%>%
   summarise(mean_duration = mean(duration_min), median = median(duration_min), n = n())
   return(mean) 
 }
 control_info <- function(df) {
-  mean <- df%>%st_drop_geometry%>% ungroup()%>% filter(nyc == FALSE) %>%
+  mean <- df%>% ungroup()%>% filter(nyc == FALSE) %>%
     summarise(mean_duration = mean(duration_min), median = median(duration_min), n = n())
   return(mean)
 }
 ```
-
+Define function to extract date/hour from formatting of mapbox filenames.
 ```{r}
 extract_date_hour <- function(file_name) {
   match <- str_match(file_name, "mapbox_output_(\\d{4}-\\d{2}-\\d{2})_HH(\\d{2})")
@@ -158,7 +128,11 @@ extract_date_hour <- function(file_name) {
   )
 }
 ```
-
+Define function to initialise an empty dataframe for results, then iterate over all files within a specified folder and then perform the following:
+1. Extract date/hour from filename.
+2. Merge file with categorical data from Jan 15.
+3. Compute mean/median of various selections of trips using functions defined above.
+4. Store this result based on date/hour of filename in initialised dataframe.
 ```{r}
 # Read all CSV files in a folder
 process_csv_files <- function(folder_path) {
@@ -168,9 +142,9 @@ process_csv_files <- function(folder_path) {
  results_df <- data.frame(
     date = character(),
     hour = character(),
-    cong_mean = numeric(),
-    trip_mean = numeric(),
-    control_mean = numeric(),
+    cong = numeric(),
+    trip = numeric(),
+    control = numeric(),
     stringsAsFactors = FALSE
   )
 
@@ -181,7 +155,6 @@ process_csv_files <- function(folder_path) {
 
     # Read the CSV file
     data <- read.csv(file)
-    
     # Apply the functions
     sf_data <- left_join(data, jan15_less, by = c("orig_long", "orig_lat", "dest_long", "dest_lat"), relationship = "many-to-many") %>% filter(duration!=0)
     congestion_result <- cong_info(sf_data)
@@ -193,9 +166,9 @@ process_csv_files <- function(folder_path) {
       data.frame(
         date = extracted$date,
         hour = extracted$hour,
-        cong_mean = congestion_result,
-        trip_mean = trip_result,
-        control_mean = control_result,
+        cong = congestion_result,
+        trip = trip_result,
+        control = control_result,
         stringsAsFactors = FALSE
       )
     )
@@ -205,121 +178,152 @@ process_csv_files <- function(folder_path) {
   return(results_df)
 }
 ```
+Apply this function to folder with mapbox data.
 ```{r}
 results <- process_csv_files(filepath)
 ```
-Mean trip duration with the congestion zone against time; line indicates date congestion relief begins.
+Define function to iterate over all files within a folder, select only first 20 trips commuting to 10001 and merge duration info for these trips into a results dataset.
 ```{r}
-ggplot(results, aes(x = as.POSIXct(paste(date, hour), format = "%Y-%m-%d %H"), y = cong_mean.mean_duration)) +
-  geom_line(color = "blue") +
-  geom_point(color = "red") +
-  geom_vline(xintercept = as.POSIXct("2025-01-05 00:00", format = "%Y-%m-%d %H"), linetype = "solid", color = "black", size = 0.8) +
-  labs(
-    x = "Time",
-    y = "Mean Duration",
-    title = "Mean Congestion Duration Over Time"
-  ) + scale_y_continuous(expand = c(0, 0), limits = c(90, NA)) + 
+process_locations <- function(folder_path) {
+  # List all CSV files in the folder
+  csv_files <- list.files(path = folder_path, pattern = "\\.csv$", full.names = TRUE)
+  results_df <- read_csv(file.path(filepath, "mapbox_output_2024-12-08_HH08.csv"))  %>% filter(zip_commute == 10001 & duration_min != 0) %>% select(orig_long, orig_lat, dest_long, dest_lat, duration_min, zip_commute) %>% slice(1:20)
+  for (file in csv_files) {
+    date_hour <- str_extract(file, "\\d{4}-\\d{2}-\\d{2}_HH\\d{2}")
+    data <- read_csv(file)
+    #Remove slicing eventually (just to get around memory limit)
+    data <- data %>% filter(zip_commute == 10001 & duration_min != 0) %>% select(orig_long, orig_lat, dest_long, dest_lat, duration_min) %>% slice(1:20) %>% rename(!!date_hour := duration_min)
+    results_df <- left_join(results_df, data, by = c("orig_long", "orig_lat", "dest_long", "dest_lat"))
+  }
+  return(results_df)
+}
+```
+```{r}
+location_results <- process_locations(filepath)
+```
+Clean result from 10001 trips, filter dates by before and after congestion zone and then calculate respective means. Plot this on NYC/NJ shapefile based on origin.
+```{r}
+location_results <- location_results %>% select(where(~ !any(is.na(.))), -duration_min, -zip_commute)
+cong_cutoff <- "2025-01-04_HH08"
+cong_cols<- location_results %>%
+  select(matches("\\d{4}-\\d{2}-\\d{2}_HH\\d{2}")) %>%  # Select date columns
+  select(which(names(.) > cong_cutoff))  # Keep only columns after the cutoff
+
+before_cong_cols<- location_results %>%
+  select(matches("\\d{4}-\\d{2}-\\d{2}_HH\\d{2}")) %>%  # Select date columns
+  select(which(names(.) <= cong_cutoff))  # Keep only columns before the cutoff
+# Compute row-wise average for filtered columns
+location_results <- location_results %>%
+  mutate(avg_after_cong= rowMeans(cong_cols, na.rm = TRUE), avg_before_cong = rowMeans(before_cong_cols, na.rm = TRUE))
+
+```
+```{r}
+location_results <- location_results %>% mutate(diff = .data[["avg_after_cong"]] - .data[["avg_before_cong"]])
+```
+```{r}
+# Convert df to an sf object (spatial format)
+location_sf <- st_as_sf(location_results, coords = c("orig_long", "orig_lat"), crs = 4326)
+
+nyc_nj_map <- bind_rows(nyc, nj_counties)
+# Load NYC shapefile or use OpenStreetMap background (alternative)
+ggplot() +
+  geom_sf(data = nyc_nj_map, fill = "gray90", color = "black", alpha = 0.5) +
+  geom_sf(data = location_sf, aes(color = diff), size = 4, alpha = 0.8) +  
+  scale_color_gradient(low = "blue", high = "red") +
+  coord_sf(xlim = c(-74.3, -73.7), ylim = c(40.5, 40.9)) +  # NYC bounding box
+  labs(title = "NYC Locations Colored by Diff Value", x = "Longitude", y = "Latitude") +
   theme_minimal()
 ```
-Median trip duration with the congestion zone against time; line indicates date congestion relief begins.
+Define function to determine day of the week:
 ```{r}
-ggplot(results, aes(x = as.POSIXct(paste(date, hour), format = "%Y-%m-%d %H"), y = cong_mean.median)) +
+is_weekday_or_weekend <- function(date) {
+  day <- weekdays(as.Date(date))
+  ifelse(day %in% c("Saturday", "Sunday"), "Weekend", "Weekday")
+}
+```
+```{r}
+results <- results %>% mutate(day = is_weekday_or_weekend(as.POSIXct(date, format = "%Y-%m-%d")))
+```
+
+Filter results by weekday/weekend/hour.
+```{r}
+results_wd <- results %>% filter(day == "Weekday")
+results_we <- results %>% filter(day == "Weekend")
+results_wd_08 <- results_wd %>% filter(hour == '08') %>% select(-hour)
+results_wd_12 <- results_wd %>% filter(hour == '12') %>% select(-hour)
+results_wd_17 <- results_wd %>% filter(hour == '17') %>% select(-hour)
+
+results_we_08 <- results_we %>% filter(hour == '08') %>% select(-hour)
+results_we_12 <- results_we %>% filter(hour == '12') %>% select(-hour)
+results_we_17 <- results_we %>% filter(hour == '17') %>% select(-hour)
+```
+
+Plot median weekday congestion at 08:00, 12:00, 17:00:
+```{r}
+ggplot(results_wd_08, aes(x = as.Date(date), y = cong.median)) +
   geom_line(color = "blue") +
   geom_point(color = "red") +
-  geom_vline(xintercept = as.POSIXct("2025-01-05 00:00", format = "%Y-%m-%d %H"), linetype = "solid", color = "black", size = 0.8) +
+  geom_vline(xintercept = as.Date("2025-01-05"), linetype = "solid", color = "black", size = 0.8) +
   labs(
-    x = "Time",
+    x = "Date",
     y = "Median Duration",
-    title = "Median Congestion Duration Over Time"
-  ) + scale_y_continuous(expand = c(0, 0), limits = c(10, NA)) + 
+    title = "Median Congestion Duration 08:00"
+  ) + scale_y_continuous(expand = c(0, 0), limits = c(30, NA)) + 
   theme_minimal()
-```
-Mean control trip duration over time (trips outside of NYC):
-```{r}
-ggplot(results, aes(x = as.POSIXct(paste(date, hour), format = "%Y-%m-%d %H"), y = control_mean.mean_duration)) +
+
+ggplot(results_wd_12, aes(x = as.Date(date), y = cong.median)) +
   geom_line(color = "blue") +
   geom_point(color = "red") +
-  geom_vline(xintercept = as.POSIXct("2025-01-05 00:00", format = "%Y-%m-%d %H"), linetype = "solid", color = "black", size = 0.8) +
+  geom_vline(xintercept = as.Date("2025-01-05"), linetype = "solid", color = "black", size = 0.8) +
   labs(
-    x = "Time",
-    y = "Mean Duration",
-    title = "Mean Control Duration Over Time"
-  ) + scale_y_continuous(expand = c(0, 0), limits = c(10, NA)) + 
+    x = "Date",
+    y = "Median Duration",
+    title = "Median Congestion Duration 12:00"
+  ) + scale_y_continuous(expand = c(0, 0), limits = c(30, NA)) +  # Ensure the y-axis starts at 100
+  theme_minimal()
+ggplot(results_wd_17, aes(x = as.Date(date), y = cong.median)) +
+  geom_line(color = "blue") +
+  geom_point(color = "red") +
+  geom_vline(xintercept = as.Date("2025-01-05"), linetype = "solid", color = "black", size = 0.8) +
+  labs(
+    x = "Date",
+    y = "Median Duration",
+    title = "Median Congestion Duration 17:00"
+  ) + scale_y_continuous(expand = c(0, 0), limits = c(30, NA)) +  # Ensure the y-axis starts at 100
   theme_minimal()
 ```
 
+Define function to compute the percent change in median trip time from 01/07 for congestion and control trips. Plot this for the same datasets as above.
 ```{r}
-results$datetime <- as.POSIXct(paste(results$date, results$hour), format = "%Y-%m-%d %H")
-ggplot(results, aes(x = datetime)) +
-  geom_line(aes(y = cong_mean.mean_duration, color = "Mean Congestion Duration"), size = 1) +
-  geom_line(aes(y = trip_mean.mean_duration, color = "Mean Trip Duration"), size = 1) +
-  geom_point(aes(y = cong_mean.mean_duration, color = "Mean Congestion Duration"), size = 2) +
-  geom_point(aes(y = trip_mean.mean_duration, color = "Mean Trip Duration"), size = 2) +
-  geom_line(aes(y = control_mean.mean_duration, color = "Mean Control Duration"), size = 1) +
-  geom_point(aes(y = control_mean.mean_duration, color = "Mean Control Duration"), size = 2) +
-  geom_vline(
-    xintercept = as.POSIXct("2025-01-05 00:00", format = "%Y-%m-%d %H"),
-    linetype = "dashed", color = "black", size = 0.8
+plot_pct_change <- function(df) {
+cong_ref_value <- df %>% 
+    filter(date == "2025-01-07") %>% 
+    pull(cong.median)
+control_ref_value <- df %>%
+  filter(date == "2025-01-07") %>%
+  pull(control.median)
+  # Compute percent change
+  df <- df %>%
+    mutate(pct_change_cong = (cong.median - cong_ref_value) / cong_ref_value * 100, pct_change_control = (control.median - control_ref_value) / control_ref_value * 100)
+  #Plot
+  ggplot(df, aes(x = as.Date(date))) +
+  geom_line(aes(y = pct_change_cong, color = "Congestion Difference from 1/07"), size = 1) +
+  geom_line(aes(y = pct_change_control, color = "Control Difference from 1/07"), size = 1) +
+  geom_point(aes(y = pct_change_cong, color = "Congestion Difference from 1/07"), size = 2) +
+  geom_point(aes(y = pct_change_control, color = "Control Difference from 1/07"), size = 2) +
+  geom_vline(xintercept = as.Date("2025-01-05"), linetype = "solid", color = "black", size = 0.8) +
+  labs(
+    x = "Date",
+    y = "% change",
+    title = "Percent Change in Trip Duration in Congestion and Control Zones"
   ) +
-  labs(
-    x = "Time",
-    y = "Duration (Minutes)",
-    title = "Congestion vs Trip Duration Over Time",
-    color = "Legend"
-  ) +
   theme_minimal()
-```
-Filter by hour.
-```{r}
-results_08 <- results %>% filter(hour == '08') %>% select(-hour)
-results_12 <- results %>% filter(hour == '12') %>% select(-hour)
-results_17 <- results %>% filter(hour == '17') %>% select(-hour)
-```
-Plot:
-```{r}
-ggplot(results_08, aes(x = as.Date(date), y = cong_mean.mean_duration)) +
-  geom_line(color = "blue") +
-  geom_point(color = "red") +
-  geom_vline(xintercept = as.Date("2025-01-05"), linetype = "solid", color = "black", size = 0.8) +
-  labs(
-    x = "Date",
-    y = "Mean Duration",
-    title = "Mean Congestion Duration 08:00"
-  ) + scale_y_continuous(expand = c(0, 0), limits = c(100, NA)) + 
-  theme_minimal()
-
-ggplot(results_12, aes(x = as.Date(date), y = cong_mean.mean_duration)) +
-  geom_line(color = "blue") +
-  geom_point(color = "red") +
-  geom_vline(xintercept = as.Date("2025-01-05"), linetype = "solid", color = "black", size = 0.8) +
-  labs(
-    x = "Date",
-    y = "Mean Duration",
-    title = "Mean Congestion Duration 12:00"
-  ) + scale_y_continuous(expand = c(0, 0), limits = c(100, NA)) +  # Ensure the y-axis starts at 100
-  theme_minimal()
-ggplot(results_17, aes(x = as.Date(date), y = cong_mean.mean_duration)) +
-  geom_line(color = "blue") +
-  geom_point(color = "red") +
-  geom_vline(xintercept = as.Date("2025-01-05"), linetype = "solid", color = "black", size = 0.8) +
-  labs(
-    x = "Date",
-    y = "Mean Duration",
-    title = "Mean Congestion Duration 17:00"
-  ) + scale_y_continuous(expand = c(0, 0), limits = c(100, NA)) +  # Ensure the y-axis starts at 100
-  theme_minimal()
-```
-
-Summary statistics:
-```{r}
-cong_stats <- results[-c(1:45), ] %>%
-  summarise(mean_cong = mean(cong_mean.mean_duration), mean_trip = mean(trip_mean.mean_duration), median_cong = median(cong_mean.median), median_trip = median(trip_mean.median), mean_control = mean(control_mean.mean_duration))
-before_cong <- results[1:45, ] %>%
-  summarise(mean_cong = mean(cong_mean.mean_duration), mean_trip = mean(trip_mean.mean_duration), median_cong = median(cong_mean.median), median_trip = median(trip_mean.median), mean_control = mean(control_mean.mean_duration))
+}
 ```
 ```{r}
-cong_stats
-before_cong
+plot_pct_change(results_wd_17)
+plot_pct_change(results_wd_08)
+plot_pct_change(results_wd_12)
 ```
 
 
